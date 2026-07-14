@@ -1,0 +1,12 @@
+[project]
+name = "futures-backtester"
+version = "0.1.0"
+description = "Modular futures strategy backtesting application"
+requires-python = ">=3.11"
+dependencies = [
+  "streamlit>=1.36",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
