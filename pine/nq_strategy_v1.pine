@@ -1,0 +1,151 @@
+//@version=6
+strategy("NQ Backtesting Strategy v1", overlay=true, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false, commission_type=strategy.commission.cash_per_contract, commission_value=2.50, slippage=0)
+
+// -----------------------------------------------------------------------------
+// NQ Backtesting Strategy v1
+// -----------------------------------------------------------------------------
+// This strategy uses confirmed-bar EMA pullback entries, ATR-based exits,
+// optional break-even and trailing-stop management, date/session filters, and
+// daily trade/P&L lockouts. It intentionally avoids look-ahead functions and
+// only submits entries after bar close confirmation to reduce repainting risk.
+//
+// Note: TradingView requires commission/slippage values inside strategy() to be
+// compile-time constants. The script sets default built-in commission/slippage
+// values in strategy(), and the configurable inputs below are exported for
+// external workflows. Set matching values in the Strategy Properties panel if
+// you change the inputs and need TradingView's built-in report to match them.
+
+// -----------------------------------------------------------------------------
+// User inputs
+// -----------------------------------------------------------------------------
+longEnabled = input.bool(true, "Long trades enabled", group="Trade Direction")
+shortEnabled = input.bool(true, "Short trades enabled", group="Trade Direction")
+
+fastEmaLength = input.int(21, "Fast EMA length", minval=1, group="Indicators")
+slowEmaLength = input.int(50, "Slow EMA length", minval=1, group="Indicators")
+atrLength = input.int(14, "ATR length", minval=1, group="Indicators")
+
+stopAtrMultiple = input.float(1.5, "Stop-loss ATR multiple", minval=0.0, step=0.1, group="Risk / Exits")
+targetAtrMultiple = input.float(2.0, "Profit-target ATR multiple", minval=0.0, step=0.1, group="Risk / Exits")
+breakEvenTriggerPoints = input.float(10.0, "Break-even trigger in points", minval=0.0, step=0.25, group="Risk / Exits")
+trailingStopDistancePoints = input.float(0.0, "Trailing-stop distance in points", minval=0.0, step=0.25, group="Risk / Exits")
+maxTradesPerDay = input.int(3, "Maximum trades per day", minval=1, group="Daily Limits")
+dailyLossLimit = input.float(1000.0, "Daily loss limit", minval=0.0, step=50.0, group="Daily Limits")
+dailyProfitTarget = input.float(1500.0, "Daily profit target", minval=0.0, step=50.0, group="Daily Limits")
+
+sessionStart = input.string("09:30", "Trading session start", group="Session")
+sessionEnd = input.string("16:00", "Trading session end", group="Session")
+testStartDate = input.time(timestamp("2024-01-01T00:00:00"), "Test start date", group="Date Range")
+testEndDate = input.time(timestamp("2030-12-31T23:59:59"), "Test end date", group="Date Range")
+
+contractQuantity = input.int(1, "Contract quantity", minval=1, group="Execution")
+commissionPerContract = input.float(2.50, "Commission per contract", minval=0.0, step=0.01, group="Execution")
+slippageTicks = input.int(0, "Slippage in ticks", minval=0, group="Execution")
+
+// -----------------------------------------------------------------------------
+// Date, session, and daily state filters
+// -----------------------------------------------------------------------------
+tradingSession = str.format("{0}-{1}", sessionStart, sessionEnd)
+inSession = not na(time(timeframe.period, tradingSession, "America/New_York"))
+inDateRange = time >= testStartDate and time <= testEndDate
+isNewDay = ta.change(time("D", "0000-2359", "America/New_York")) != 0
+
+var int dailyTradeCount = 0
+var float dayStartNetProfit = strategy.netprofit
+if isNewDay
+    dailyTradeCount := 0
+    dayStartNetProfit := strategy.netprofit
+
+currentDailyPnl = strategy.netprofit - dayStartNetProfit
+hitDailyLossLimit = dailyLossLimit > 0 and currentDailyPnl <= -dailyLossLimit
+hitDailyProfitTarget = dailyProfitTarget > 0 and currentDailyPnl >= dailyProfitTarget
+canTradeToday = dailyTradeCount < maxTradesPerDay and not hitDailyLossLimit and not hitDailyProfitTarget
+canEnter = barstate.isconfirmed and inDateRange and inSession and canTradeToday and strategy.position_size == 0
+
+// -----------------------------------------------------------------------------
+// Indicator calculations
+// -----------------------------------------------------------------------------
+fastEma = ta.ema(close, fastEmaLength)
+slowEma = ta.ema(close, slowEmaLength)
+atrValue = ta.atr(atrLength)
+
+// -----------------------------------------------------------------------------
+// Confirmed-bar entry conditions. No request.security() or future references are
+// used, which helps avoid look-ahead bias and repainting.
+// -----------------------------------------------------------------------------
+longEntryCondition = canEnter and longEnabled and fastEma > slowEma and low <= fastEma and close > fastEma
+shortEntryCondition = canEnter and shortEnabled and fastEma < slowEma and high >= fastEma and close < fastEma
+
+// -----------------------------------------------------------------------------
+// Persistent trade-management state
+// -----------------------------------------------------------------------------
+var float entryAtr = na
+var float longTrailStop = na
+var float shortTrailStop = na
+
+if strategy.position_size == 0
+    entryAtr := na
+    longTrailStop := na
+    shortTrailStop := na
+
+if longEntryCondition
+    entryAtr := atrValue
+    strategy.entry("Long", strategy.long, qty=contractQuantity, comment="Long EMA Pullback")
+    dailyTradeCount += 1
+
+if shortEntryCondition
+    entryAtr := atrValue
+    strategy.entry("Short", strategy.short, qty=contractQuantity, comment="Short EMA Pullback")
+    dailyTradeCount += 1
+
+// -----------------------------------------------------------------------------
+// ATR stop/target, optional break-even, and optional trailing stop exits
+// -----------------------------------------------------------------------------
+activeAtr = na(entryAtr) ? atrValue : entryAtr
+longAtrStop = strategy.position_avg_price - activeAtr * stopAtrMultiple
+longTarget = strategy.position_avg_price + activeAtr * targetAtrMultiple
+shortAtrStop = strategy.position_avg_price + activeAtr * stopAtrMultiple
+shortTarget = strategy.position_avg_price - activeAtr * targetAtrMultiple
+
+if strategy.position_size > 0
+    breakEvenStop = breakEvenTriggerPoints > 0 and high - strategy.position_avg_price >= breakEvenTriggerPoints ? strategy.position_avg_price : na
+    longTrailStop := trailingStopDistancePoints > 0 ? math.max(nz(longTrailStop, longAtrStop), high - trailingStopDistancePoints) : na
+    finalLongStop = math.max(longAtrStop, nz(breakEvenStop, longAtrStop), nz(longTrailStop, longAtrStop))
+    strategy.exit("Long Exit", from_entry="Long", stop=finalLongStop, limit=longTarget, comment="Long ATR Exit")
+
+if strategy.position_size < 0
+    breakEvenStop = breakEvenTriggerPoints > 0 and strategy.position_avg_price - low >= breakEvenTriggerPoints ? strategy.position_avg_price : na
+    shortTrailStop := trailingStopDistancePoints > 0 ? math.min(nz(shortTrailStop, shortAtrStop), low + trailingStopDistancePoints) : na
+    finalShortStop = math.min(shortAtrStop, nz(breakEvenStop, shortAtrStop), nz(shortTrailStop, shortAtrStop))
+    strategy.exit("Short Exit", from_entry="Short", stop=finalShortStop, limit=shortTarget, comment="Short ATR Exit")
+
+// Close any open position when the configured session ends.
+if barstate.isconfirmed and strategy.position_size != 0 and inSession[1] and not inSession
+    strategy.close_all(comment="End of selected session")
+
+// -----------------------------------------------------------------------------
+// Visible plots and entry markers
+// -----------------------------------------------------------------------------
+visibleStopPrice = strategy.position_size > 0 ? math.max(longAtrStop, nz(longTrailStop, longAtrStop)) : strategy.position_size < 0 ? math.min(shortAtrStop, nz(shortTrailStop, shortAtrStop)) : na
+visibleTargetPrice = strategy.position_size > 0 ? longTarget : strategy.position_size < 0 ? shortTarget : na
+
+plot(fastEma, "Fast EMA", color=color.orange, linewidth=2)
+plot(slowEma, "Slow EMA", color=color.blue, linewidth=2)
+plot(visibleStopPrice, "Stop price", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(visibleTargetPrice, "Target price", color=color.green, style=plot.style_linebr, linewidth=2)
+plotshape(longEntryCondition, "Long entry marker", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small, text="L")
+plotshape(shortEntryCondition, "Short entry marker", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="S")
+
+// -----------------------------------------------------------------------------
+// Hidden numeric export plots. These use display.none so they do not clutter the
+// chart, but TradingView includes them in exported chart data.
+// -----------------------------------------------------------------------------
+plot(longEntryCondition ? 1 : 0, "Export Long Entry Condition", display=display.none)
+plot(shortEntryCondition ? 1 : 0, "Export Short Entry Condition", display=display.none)
+plot(atrValue, "Export ATR Value", display=display.none)
+plot(visibleStopPrice, "Export Stop Price", display=display.none)
+plot(visibleTargetPrice, "Export Target Price", display=display.none)
+plot(inSession ? 1 : 0, "Export Current Session Status", display=display.none)
+plot(dailyTradeCount, "Export Daily Trade Count", display=display.none)
+plot(commissionPerContract, "Export Commission Per Contract", display=display.none)
+plot(slippageTicks, "Export Slippage Ticks", display=display.none)

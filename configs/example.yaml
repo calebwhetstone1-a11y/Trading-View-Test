@@ -1,0 +1,32 @@
+contract:
+  symbol: NQ
+  point_value: 20.0
+  tick_size: 0.25
+  commission_per_contract: 2.50
+backtest:
+  starting_balance: 50000
+  contracts: 1
+  slippage_ticks: 1
+  date_start: '2024-01-01'
+  date_end: '2024-12-31'
+  session_start: '09:30'
+  session_end: '16:00'
+  timezone: America/New_York
+strategy:
+  direction: both
+  ema_fast: 9
+  ema_slow: 21
+  atr_period: 14
+  relative_volume_period: 20
+  use_vwap: true
+  stop_loss_points: 20
+  profit_target_points: 40
+  max_trades_per_day: 3
+prop_firm:
+  profit_target: 3000
+  daily_loss_limit: 1000
+  static_drawdown: 2500
+  minimum_trading_days: 5
+optimization:
+  ranking: net_profit
+  minimum_trades: 30
